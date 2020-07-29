@@ -16,68 +16,101 @@
 //! This program is an adaptation of a python script referenced in the Arch Linux wiki:
 //! https://gist.githubusercontent.com/ei-grad/4d9d23b1463a99d24a8d/raw/rotate.py
 //! It's also an attempt to learn Rust by doing something useful for me.
+
 use std::fs::read_to_string;
+use std::io;
+use std::num::ParseIntError;
 use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
 
-fn read_value(path: &str) -> f64 {
-    let raw = read_to_string(path)
-        .expect(format!("Couldn't open file {}\nDo you have an accelerometer?", path).as_str());
+#[derive(Debug)]
+enum ReadError {
+    IOError(io::Error),
+    ParseError(ParseIntError),
+}
+
+impl From<io::Error> for ReadError {
+    fn from(error: io::Error) -> Self {
+        ReadError::IOError(error)
+    }
+}
+
+impl From<ParseIntError> for ReadError {
+    fn from(error: ParseIntError) -> Self {
+        ReadError::ParseError(error)
+    }
+}
+
+fn read_value(path: &str) -> Result<f64, ReadError> {
+    let raw = read_to_string(path)?;
 
     if let Ok(value) = raw.trim().parse::<f64>() {
-        value
+        Ok(value)
     } else {
         // Maybe it's a integer, try again
-        if let Ok(value) = raw.trim().parse::<isize>() {
-            value as f64
-        } else {
-            println!("Can't parse content of {}", path);
-            panic!();
-        }
+        let value = raw.trim().parse::<isize>()?;
+        Ok(value as f64)
     }
 }
 
-/// Using xrandr, rotate the current output to the specified orientation and adjust the inputs
-/// accordingly.
-fn rotate(orientation: LaptopOrientation) {
+#[derive(Debug)]
+enum RotationError<'a> {
+    ExecError(io::Error),
+    RotateScreen(&'a str),
+    DisableKeyboard,
+    EnableKeyboard,
+    DisableTouchpad,
+    EnableTouchpad,
+}
+
+/// Helper function to reduce duplication of code when invoking an external command
+fn invoke<'a>(command: &mut Command, err_msg: &'a str) -> Result<(), RotationError<'a>> {
+    match command.status() {
+        Ok(status) => {
+            if !status.success() {
+                Err(RotationError::RotateScreen(err_msg))
+            } else {
+                Ok(())
+            }
+        }
+        Err(err) => Err(RotationError::ExecError(err)),
+    }
+}
+
+/// Using xrandr, rotate the current output based on the laptop orientation.
+fn rotate<'a>(orientation: LaptopOrientation) -> Result<(), RotationError<'a>> {
     // instantiate once to avoid duplication
     let mut xrandr = Command::new("xrandr");
-    let mut _xinput = Command::new("xinput");
 
     match orientation {
-        LaptopOrientation::Normal => {
-            xrandr
-                .args(&["--orientation", "normal"])
-                .status()
-                .expect("Failed to rotate in normal orientation");
-        }
-        LaptopOrientation::PortraitLeft => {
-            xrandr
-                .args(&["--orientation", "right"])
-                .status()
-                .expect("Failed to rotate the screen right");
-        }
-        LaptopOrientation::PortraitRight => {
-            xrandr
-                .args(&["--orientation", "left"])
-                .status()
-                .expect("Failed to rotate the screen left");
-        }
-        LaptopOrientation::Tent => {
-            xrandr
-                .args(&["--orientation", "inverted"])
-                .status()
-                .expect("Failed to invert the screen orientation");
-        }
-        LaptopOrientation::Tablet => {
-            xrandr
-                .args(&["--orientation", "normal"])
-                .status()
-                .expect("Failed to rotate in normal orientation");
-        }
+        LaptopOrientation::Normal | LaptopOrientation::Tablet => invoke(
+            xrandr.args(&["--orientation", "normal"]),
+            "xrandr couldn't rotate screen in normal orientation",
+        ),
+        LaptopOrientation::PortraitLeft => invoke(
+            xrandr.args(&["--orientation", "right"]),
+            "xrandr couldn't rotate screen right",
+        ),
+        LaptopOrientation::PortraitRight => invoke(
+            xrandr.args(&["--orientation", "left"]),
+            "xrandr couldn't rotate screen to the left",
+        ),
+        LaptopOrientation::Tent => invoke(
+            xrandr.args(&["--orientation", "inverted"]),
+            "xrandr couldn't rotate screen 180°",
+        ),
     }
 }
+
+/// Using xinput, adjust the inputs according to the laptop orientation.
+// fn adjust_inputs(orientation: LaptopOrientation) -> Result<(), RotationError> {
+//     let mut xinput = Command::new("xinput");
+//
+//     match orientation {
+//         LaptopOrientation::Normal {}
+//     }
+// }
 
 /// Calculate the proper value collected by the iio after the ADC
 fn normalize(value: f64, scale: f64, offset: f64) -> f64 {
@@ -130,7 +163,7 @@ enum LaptopOrientation {
 /// |     | |      z = 0
 /// +-----+-+
 ///
-/// +---------+    Screen is rotated left, facing the sky.
+/// +---------+    Screen is horizontal, facing the sky.
 /// |    o    |
 /// +---------+    x = 0
 /// |         |    y = 0
@@ -185,23 +218,36 @@ impl Accelerometer {
     }
 }
 
+#[derive(Debug)]
+enum ProgramError<'a> {
+    RotationError(RotationError<'a>),
+    ReadError(ReadError),
+}
+
+impl From<ReadError> for ProgramError<'_> {
+    fn from(read_err: ReadError) -> Self {
+        ProgramError::ReadError(read_err)
+    }
+}
+
+impl<'p> From<RotationError<'p>> for ProgramError<'p> {
+    fn from(rotate_err: RotationError<'p>) -> Self {
+        ProgramError::RotationError(rotate_err)
+    }
+}
+
 fn main() {
     loop {
-        let accel_x_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_x_raw");
-        let accel_y_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_y_raw");
-        let accel_z_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_z_raw");
-        let scale = read_value("/sys/bus/iio/devices/iio:device0/in_accel_scale");
-        let offset = read_value("/sys/bus/iio/devices/iio:device0/in_accel_offset");
+        let accel_x_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_x_raw").unwrap();
+        let accel_y_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_y_raw").unwrap();
+        let accel_z_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_z_raw").unwrap();
+        let scale = read_value("/sys/bus/iio/devices/iio:device0/in_accel_scale").unwrap();
+        let offset = read_value("/sys/bus/iio/devices/iio:device0/in_accel_offset").unwrap();
 
-        match Accelerometer::new(accel_x_raw, accel_y_raw, accel_z_raw, scale, offset)
-            .which_orientation()
-        {
-            LaptopOrientation::Normal => rotate(LaptopOrientation::Normal),
-            LaptopOrientation::PortraitLeft => rotate(LaptopOrientation::PortraitLeft),
-            LaptopOrientation::PortraitRight => rotate(LaptopOrientation::PortraitRight),
-            LaptopOrientation::Tent => rotate(LaptopOrientation::Tent),
-            LaptopOrientation::Tablet => rotate(LaptopOrientation::Tablet),
-        }
+        let current_orientation =
+            Accelerometer::new(accel_x_raw, accel_y_raw, accel_z_raw, scale, offset)
+                .which_orientation();
+        rotate(current_orientation).unwrap();
 
         sleep(Duration::from_secs(5));
     }
