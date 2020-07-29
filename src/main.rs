@@ -7,16 +7,17 @@
 //! The iio exposes values produced by the analog device and performs a Analog to Digital Conversion
 //! (ADC). So it's a poll model, I think there's no way of getting notified when the values change.
 //! I've found some interesting documentation about the IIO subsystem here:
-//! https://wiki.analog.com/software/linux/docs/iio/iio
+//! <https://wiki.analog.com/software/linux/docs/iio/iio>
 //!
 //! In my laptop (Lenovo Yoga C940) there's only one accelerometer that captures
 //! the screen orientation in space in the 3 axes (x y z). The code below details the meaning of
 //! these values.
 //!
 //! This program is an adaptation of a python script referenced in the Arch Linux wiki:
-//! https://gist.githubusercontent.com/ei-grad/4d9d23b1463a99d24a8d/raw/rotate.py
+//! <https://gist.githubusercontent.com/ei-grad/4d9d23b1463a99d24a8d/raw/rotate.py>
 //! It's also an attempt to learn Rust by doing something useful for me.
-
+#![deny(clippy::all)]
+#![deny(clippy::pedantic)]
 use std::fs::read_to_string;
 use std::io;
 use std::num::ParseIntError;
@@ -49,8 +50,8 @@ fn read_value(path: &str) -> Result<f64, ReadError> {
         Ok(value)
     } else {
         // Maybe it's a integer, try again
-        let value = raw.trim().parse::<isize>()?;
-        Ok(value as f64)
+        let value = raw.trim().parse::<i32>()?;
+        Ok(f64::from(value))
     }
 }
 
@@ -68,10 +69,10 @@ enum RotationError<'a> {
 fn invoke<'a>(command: &mut Command, err_msg: &'a str) -> Result<(), RotationError<'a>> {
     match command.status() {
         Ok(status) => {
-            if !status.success() {
-                Err(RotationError::RotateScreen(err_msg))
-            } else {
+            if status.success() {
                 Ok(())
+            } else {
+                Err(RotationError::RotateScreen(err_msg))
             }
         }
         Err(err) => Err(RotationError::ExecError(err)),
@@ -79,7 +80,7 @@ fn invoke<'a>(command: &mut Command, err_msg: &'a str) -> Result<(), RotationErr
 }
 
 /// Using xrandr, rotate the current output based on the laptop orientation.
-fn rotate<'a>(orientation: LaptopOrientation) -> Result<(), RotationError<'a>> {
+fn rotate<'a>(orientation: &LaptopOrientation) -> Result<(), RotationError<'a>> {
     // instantiate once to avoid duplication
     let mut xrandr = Command::new("xrandr");
 
@@ -98,7 +99,7 @@ fn rotate<'a>(orientation: LaptopOrientation) -> Result<(), RotationError<'a>> {
         ),
         LaptopOrientation::Tent => invoke(
             xrandr.args(&["--orientation", "inverted"]),
-            "xrandr couldn't rotate screen 180°",
+            "xrandr couldn't rotate screen 180\u{b0}",
         ),
     }
 }
@@ -238,16 +239,15 @@ impl<'p> From<RotationError<'p>> for ProgramError<'p> {
 
 fn main() {
     loop {
-        let accel_x_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_x_raw").unwrap();
-        let accel_y_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_y_raw").unwrap();
-        let accel_z_raw = read_value("/sys/bus/iio/devices/iio:device0/in_accel_z_raw").unwrap();
+        let accel_x = read_value("/sys/bus/iio/devices/iio:device0/in_accel_x_raw").unwrap();
+        let accel_y = read_value("/sys/bus/iio/devices/iio:device0/in_accel_y_raw").unwrap();
+        let accel_z = read_value("/sys/bus/iio/devices/iio:device0/in_accel_z_raw").unwrap();
         let scale = read_value("/sys/bus/iio/devices/iio:device0/in_accel_scale").unwrap();
         let offset = read_value("/sys/bus/iio/devices/iio:device0/in_accel_offset").unwrap();
 
         let current_orientation =
-            Accelerometer::new(accel_x_raw, accel_y_raw, accel_z_raw, scale, offset)
-                .which_orientation();
-        rotate(current_orientation).unwrap();
+            Accelerometer::new(accel_x, accel_y, accel_z, scale, offset).which_orientation();
+        rotate(&current_orientation).unwrap();
 
         sleep(Duration::from_secs(5));
     }
