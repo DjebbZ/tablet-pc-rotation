@@ -18,8 +18,10 @@
 //! It's also an attempt to learn Rust by doing something useful for me.
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
+
 use std::fs::read_to_string;
 use std::io;
+use std::io::{Error, ErrorKind};
 use std::num::ParseIntError;
 use std::process::Command;
 use std::thread::sleep;
@@ -43,9 +45,11 @@ impl From<ParseIntError> for ReadError {
     }
 }
 
+/// Read the file and return its content, which is supposed to be a single value in a single line.
 fn read_value(path: &str) -> Result<f64, ReadError> {
     let raw = read_to_string(path)?;
 
+    // TODO: simplify the control flow with `or_else` chaining
     if let Ok(value) = raw.trim().parse::<f64>() {
         Ok(value)
     } else {
@@ -55,63 +59,150 @@ fn read_value(path: &str) -> Result<f64, ReadError> {
     }
 }
 
-#[derive(Debug)]
-enum RotationError<'a> {
-    ExecError(io::Error),
-    RotateScreen(&'a str),
-    DisableKeyboard,
-    EnableKeyboard,
-    DisableTouchpad,
-    EnableTouchpad,
-}
-
 /// Helper function to reduce duplication of code when invoking an external command
-fn invoke<'a>(command: &mut Command, err_msg: &'a str) -> Result<(), RotationError<'a>> {
+fn invoke_rotation(command: &mut Command, err_msg: &str) -> io::Result<()> {
     match command.status() {
         Ok(status) => {
             if status.success() {
                 Ok(())
             } else {
-                Err(RotationError::RotateScreen(err_msg))
+                Err(io::Error::new(ErrorKind::Other, err_msg))
             }
         }
-        Err(err) => Err(RotationError::ExecError(err)),
+        Err(err) => Err(err),
     }
 }
 
 /// Using xrandr, rotate the current output based on the laptop orientation.
-fn rotate<'a>(orientation: &LaptopOrientation) -> Result<(), RotationError<'a>> {
+fn rotate(orientation: &LaptopOrientation) -> io::Result<()> {
     // instantiate once to avoid duplication
     let mut xrandr = Command::new("xrandr");
+    let inputs = list_inputs()?;
 
-    match orientation {
-        LaptopOrientation::Normal | LaptopOrientation::Tablet => invoke(
+    let screen_rotated = match orientation {
+        LaptopOrientation::Normal | LaptopOrientation::Tablet => invoke_rotation(
             xrandr.args(&["--orientation", "normal"]),
             "xrandr couldn't rotate screen in normal orientation",
         ),
-        LaptopOrientation::PortraitLeft => invoke(
+
+        LaptopOrientation::PortraitLeft => invoke_rotation(
             xrandr.args(&["--orientation", "right"]),
             "xrandr couldn't rotate screen right",
         ),
-        LaptopOrientation::PortraitRight => invoke(
+        LaptopOrientation::PortraitRight => invoke_rotation(
             xrandr.args(&["--orientation", "left"]),
             "xrandr couldn't rotate screen to the left",
         ),
-        LaptopOrientation::Tent => invoke(
+        LaptopOrientation::Tent => invoke_rotation(
             xrandr.args(&["--orientation", "inverted"]),
             "xrandr couldn't rotate screen 180\u{b0}",
         ),
-    }
+    };
+
+    screen_rotated.and_then(|_| adjust_keyboard(orientation, &inputs))
 }
 
-/// Using xinput, adjust the inputs according to the laptop orientation.
-// fn adjust_inputs(orientation: LaptopOrientation) -> Result<(), RotationError> {
-//     let mut xinput = Command::new("xinput");
-//
-//     match orientation {
-//         LaptopOrientation::Normal {}
-//     }
+/// Returns elements in `inputs` that match the elements in `to_find`.
+/// Elements of `to_find` must be substrings contained in elements of `inputs`
+fn find_inputs<'a>(inputs: &'a [String], to_find: &'a [String]) -> Vec<&'a String> {
+    inputs
+        .iter()
+        .filter(|device| {
+            to_find.iter().any(|tofind| {
+                tofind
+                    .to_ascii_lowercase()
+                    .contains(&device.to_ascii_lowercase())
+            })
+        })
+        .collect::<Vec<&String>>()
+}
+
+fn adjust_keyboard(orientation: &LaptopOrientation, inputs: &[String]) -> io::Result<()> {
+    let keyboard_to_find = &[String::from("AT Translated Set 2 keyboard")];
+    let keyboard: Vec<&String> = find_inputs(inputs, keyboard_to_find);
+
+    if keyboard.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::Other, "No keyboard found"));
+    }
+
+    match orientation {
+        LaptopOrientation::Normal => {
+            let status = Command::new("xinput")
+                .arg("enable")
+                .arg(keyboard[0]) // `keyboard[0]` because I suppose there should be only one integrated keyboard in a laptop
+                .status()
+                .expect("Couldn't run `xinput`, are you sure it's installed properly?");
+            if !status.success() {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    "xinput failed to enable the keyboard",
+                ));
+            }
+        }
+        LaptopOrientation::PortraitLeft
+        | LaptopOrientation::PortraitRight
+        | LaptopOrientation::Tent
+        | LaptopOrientation::Tablet => {
+            let status = Command::new("xinput")
+                .arg("disable")
+                .arg(keyboard[0])
+                .status()
+                .expect("Couldn't run `xinput`, are you sure it's installed properly?");
+            if !status.success() {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    "xinput failed to disable the keyboard",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// fn adjust_touchscreens(orientation: &LaptopOrientation, inputs: Vec<&str>) -> io::Result<()> {
+//     let touchscreens: Vec<&str> = inputs
+//         .iter()
+//         .filter(|&device| {
+//             device.to_ascii_lowercase().contains("touchscreen")
+//                 || device.to_ascii_lowercase().contains("wacom")
+//         })
+//         .map(|dev| *dev)
+//         .collect();
 // }
+//
+// fn adjust_touchpads(orientation: &LaptopOrientation, inputs: Vec<&str>) -> io::Result<()> {
+//     let touchpads: Vec<&str> = inputs
+//         .iter()
+//         .filter(|device| {
+//             device.to_ascii_lowercase().contains("touchpad")
+//                 || device.to_ascii_lowercase().contains("trackpoint")
+//         })
+//         .map(|dev| *dev)
+//         .collect();
+// }
+
+/// Using xinput, list the available inputs.
+fn list_inputs() -> io::Result<Vec<String>> {
+    let output = Command::new("xinput")
+        .args(&["list", "--name-only"])
+        .output()
+        .expect("Failed to run xinput, is it properly installed?");
+
+    if !output.status.success() {
+        panic!("xinput failed to list the inputs.");
+    }
+
+    let output =
+        String::from_utf8(output.stdout).map_err(|err| Error::new(ErrorKind::Other, err))?;
+
+    let inputs: Vec<String> = output
+        .lines()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    Ok(inputs)
+}
 
 /// Calculate the proper value collected by the iio after the ADC
 fn normalize(value: f64, scale: f64, offset: f64) -> f64 {
@@ -216,24 +307,6 @@ impl Accelerometer {
             // safe fallback
             LaptopOrientation::Normal
         }
-    }
-}
-
-#[derive(Debug)]
-enum ProgramError<'a> {
-    RotationError(RotationError<'a>),
-    ReadError(ReadError),
-}
-
-impl From<ReadError> for ProgramError<'_> {
-    fn from(read_err: ReadError) -> Self {
-        ProgramError::ReadError(read_err)
-    }
-}
-
-impl<'p> From<RotationError<'p>> for ProgramError<'p> {
-    fn from(rotate_err: RotationError<'p>) -> Self {
-        ProgramError::RotationError(rotate_err)
     }
 }
 
