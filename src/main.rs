@@ -53,7 +53,8 @@ impl From<ParseIntError> for ReadError {
 
 /// Read the file and return its content, which is supposed to be a single value in a single line.
 fn read_value(path: &Path) -> Result<f64, ReadError> {
-    let raw = read_to_string(path)?;
+    let raw = read_to_string(path)
+        .map_err(|_| io::Error::new(ErrorKind::NotFound, format!("file {:?} not found", path)))?;
 
     // TODO: simplify the control flow with `or_else` chaining. Didn't manage yet.
     if let Ok(value) = raw.trim().parse::<f64>() {
